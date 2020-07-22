@@ -22,9 +22,7 @@ REQUIRED = [
 ]
 
 # What packages are optional?
-EXTRAS = {
-    # 'fancy feature': ['django'],
-}
+EXTRAS = {}
 
 here = os.path.abspath(os.path.dirname(__file__))
 
