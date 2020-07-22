@@ -4,6 +4,6 @@ Python custom package that provides functions for controlling docker daemon usin
 
 To install:
 ```
-pip install docker-wrapper
+pip install tl-dockerwrapper
 ```
 
