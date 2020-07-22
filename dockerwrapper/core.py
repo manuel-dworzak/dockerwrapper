@@ -1,6 +1,6 @@
 from threading import Lock
-import logging
 import docker
+from .exceptions import *
 
 class SingletonMeta(type):
     """
@@ -21,16 +21,14 @@ class DockerWrapper(metaclass=SingletonMeta):
     Wrapper class for Docker SDKs
     """
     def __init__(self) -> None:
-        self.logger = logging.getLogger(__name__)
         self.docker_client = None
         self.dcli = None
         self.containers = []
         try:
-            self.logger.info("Create DockerWrapper with default configuration (localhost)")
             self.docker_client = docker.from_env()
             self.dcli = self.docker_client.api
         except Exception as e:
-            self.logger.error(e)
+            raise ConfigError("Unable to initialize docker_client", e)
 
     def _check_cli(self):
         if not self.dcli:
@@ -86,8 +84,6 @@ class DockerWrapper(metaclass=SingletonMeta):
         container_command = command if command is not None else "/bin/sh"
 
         try:
-            self.logger.info("Prepare to create container {}".format(name))
-
             # create host_config for container
             container_host_config = self.dcli.create_host_config(
                 network_mode=defaults['network_mode'],
@@ -122,7 +118,6 @@ class DockerWrapper(metaclass=SingletonMeta):
 
             # start container
             self.dcli.start(container)
-            self.logger.debug("Starting container {}".format(name))
             # fetch information about new container
             container_info = self.dcli.inspect_container(container)
             container_id = container_info.get("Id")
@@ -132,16 +127,11 @@ class DockerWrapper(metaclass=SingletonMeta):
                                     'id': container_id,
                                     'info': container_info})
 
-            self.logger.info("Inspect container {} [{}]: {}".format(name,
-                                                                    container_id,
-                                                                    container_info))
-
             return {'status': True,
                     'msg': "Create container {} successfully. Id: {}".format(name, container_id),
                     'info': container_info}
         except Exception as e:
-            self.logger.error("Exception raised! {}".format(str(e)))
-            return {'status': False, 'msg': str(e)}
+            raise ContainerError(e)
 
     @staticmethod
     def _extract_volume_mount_name(volume_path: str):
