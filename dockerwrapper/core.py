@@ -1,20 +1,9 @@
-from threading import Lock
-import docker
+import docker, json, collections
+from docker import errors, types
 from .exceptions import *
+from utilities import SingletonMeta
 
-class SingletonMeta(type):
-    """
-    This is a thread-safe implementation of Singleton.
-    """
-    _instances = {}
-    _lock: Lock = Lock()
-
-    def __call__(cls, *args, **kwargs):
-        with cls._lock:
-            if cls not in cls._instances:
-                instance = super().__call__(*args, **kwargs)
-                cls._instances[cls] = instance
-        return cls._instances[cls]
+RepoTag = collections.namedtuple("RepoTag", 'repo tag')
 
 class DockerWrapper(metaclass=SingletonMeta):
     """
@@ -30,113 +19,365 @@ class DockerWrapper(metaclass=SingletonMeta):
         except Exception as e:
             raise ConfigError("Unable to initialize docker_client", e)
 
-    def _check_cli(self):
-        if not self.dcli:
-            raise TypeError("Failed to initialize dcli api.")
 
-    def create_container(self, name:str, image:str, command:str, **kwargs) -> {}:
-        self._check_cli()
+    def create_container(self, container_config) -> {}:
         """
         Create a Docker container based on input parameters
-        :param name: desired name of the container
-        :param image: chosen docker image for container
-        :param command: command used for container
-        :param kwargs: additional keyword arguments used to set up container
-        :return: a dictionary contains status,message
+        :param container_config: all information needed to create a new docker container
+        :return: dict
         """
-        container_id = None  # Id of this container
-        container_info = None  # Information of this container
-        # default configuration resource limits
-        # default configuration resource limits
+        cont_id = None # Id of new created container
+
+        # default container resource limits & other configuration
         defaults = {
-            'cpu_quota': -1,
-            'cpu_period': None,
-            'cpu_shares': None,
-            'cpuset_cpus': None,
             'mem_limit': None,
             'memswap_limit': None,
-            'environment': {},
-            'volumes': [],  # use ["/home/user1/:/mnt/vol2:rw"]
-            'tmpfs': [],  # use ["/home/vol1/:size=3G,uid=1000"]
-            'network_mode': None,
             'publish_all_ports': True,
-            'port_bindings': {},
-            'ports': [],
-            'dns': [],
             'ipc_mode': None,
             'devices': [],
-            'cap_add': [],
-            'sysctls': {}
+            'cap_add': []
         }
-        defaults.update(kwargs)
 
-        # keep resource in a dict for easy update during container lifetime
-        container_resources = dict(
-            cpu_quota=defaults['cpu_quota'],
-            cpu_period=defaults['cpu_period'],
-            cpu_shares=defaults['cpu_shares'],
-            cpuset_cpus=defaults['cpuset_cpus'],
+        # check image for existence
+        cont_image = self.get_image_repo_tag(container_config['image'])
+
+        if not self._image_pulled(cont_image.repo, cont_image.tag):
+            raise ContainerError("Cannot create container {}. Image {} not found".format(
+                container_config['container'], container_config['image']), None)
+
+        # get entrypoint if possible
+        if not container_config['entrypoint']:
+            try:
+                image_info = self.dcli.inspect_image("{}:{}".format(*cont_image))
+
+                if image_info['ContainerConfig']:
+                    container_config['entrypoint'] = image_info['ContainerConfig']['Entrypoint']
+                elif image_info['Config']:
+                    container_config['entrypoint'] = image_info['Config']['Entrypoint']
+            except errors.APIError as err:
+                raise ContainerError("Cannot create container {} using image {}. Entrypoint not found.".format(
+                    container_config['container'], container_config['image']), err)
+
+
+        # create container's host_config
+        host_config = self.dcli.create_host_config(
+            network_mode=container_config['network_mode'],
+            binds=container_config['volumes'],
+            tmpfs=container_config['tmpfs'],
+            publish_all_ports=defaults['publish_all_ports'],
             mem_limit=defaults['mem_limit'],
-            memswap_limit=defaults['memswap_limit']
+            memswap_limit=defaults['memswap_limit'],
+            dns=container_config['dns'],
+            ipc_mode=defaults['ipc_mode'],
+            devices=defaults['devices'],
+            cap_add=defaults['cap_add'],
+            sysctls=container_config['sysctls'],
+            port_bindings=self._get_port_bindings(container_config['ports']) if container_config['ports'] else {},
+            restart_policy=self._get_restart_policy(container_config['restart']) if container_config['restart'] else None,
+            extra_hosts=self._get_extra_hosts(container_config['extra_hosts']) if container_config['extra_hosts'] else None,
         )
 
-        # set up default command for container
-        container_command = command if command is not None else "/bin/sh"
+        main_net_config = {}
+        remain_net_configs = []
+        net_count = 0
+        # get first network as main config, other networks will be connected later
+        if container_config['networks']:
+            for network in container_config['networks']:
+                if net_count == 0:
+                    print("Create main_net_config")
+                    # create endpoint_config
+                    endpoint_config = self.dcli.create_endpoint_config(
+                        aliases=network['config']['aliases'],
+                        ipv4_address=network['config']['ipv4_address'],
+                        ipv6_address=network['config']['ipv6_address'],
+                    )
+                    main_net_config = self.dcli.create_networking_config({
+                        network['name']: endpoint_config,
+                    })
+                else:
+                    print("Create other_net_config")
+                    created_net = self._get_network_by_name(network['name'])
+                    if created_net:
+                        remain_net_configs.append({
+                            'net_id': created_net['Id'],
+                            'aliases': network['config']['aliases'],
+                            'ipv4_address': network['config']['ipv4_address'],
+                            'ipv6_address': network['config']['ipv6_address'],
+                        })
 
+                net_count += 1
+
+        # create new docker container
         try:
-            # create host_config for container
-            container_host_config = self.dcli.create_host_config(
-                network_mode=defaults['network_mode'],
-                binds=defaults['volumes'],
-                tmpfs=defaults['tmpfs'],
-                publish_all_ports=defaults['publish_all_ports'],
-                port_bindings=defaults['port_bindings'],
-                mem_limit=container_resources.get('mem_limit'),
-                cpuset_cpus=container_resources.get('cpuset_cpus'),
-                dns=defaults['dns'],
-                ipc_mode=defaults['ipc_mode'],
-                devices=defaults['devices'],
-                cap_add=defaults['cap_add'],
-                sysctls=defaults['sysctls']
-            )
-
-            # create new docker container
             container = self.dcli.create_container(
-                name=name,
-                image=image,
-                command=container_command,
-                entrypoint=list(),
-                stdin_open=True,
-                tty=True,
-                environment=defaults['environment'],
-                host_config=container_host_config,
-                ports=defaults['ports'],
-                volumes=[self._extract_volume_mount_name(path) for path in defaults['volumes'] if
-                         self._extract_volume_mount_name(path) is not None],
-                hostname=name
+                name=container_config['container_name'],
+                image=container_config['image'],
+                command=container_config['command'],
+                entrypoint=container_config['entrypoint'],
+                stdin_open=True,  # keep container open
+                tty=True,  # allocate pseudo tty
+                environment=container_config['environment'],
+                host_config=host_config,
+                networking_config={} if not main_net_config else main_net_config,
+                ports=self._get_ports(container_config['ports']),
+                volumes=[self._extract_volume_mount_name(p) for p in container_config['volumes']
+                         if self._extract_volume_mount_name(p) is not None],
+                labels=container_config['labels'],
+                hostname=container_config['hostname']
             )
+        except errors.APIError as err:
+            raise ContainerError("Failed to create container.", err)
 
-            # start container
-            self.dcli.start(container)
-            # fetch information about new container
-            container_info = self.dcli.inspect_container(container)
-            container_id = container_info.get("Id")
+        cont_id = container.get('Id')
+        try:
+            self.dcli.start(container=cont_id)
+        except errors.APIError as err:
+            raise ContainerError("Failed to start container {}-{}.".format(container_config['container_name'],
+                                                                           cont_id), err)
 
-            # add to list of containers
-            self.containers.append({'name': name,
-                                    'id': container_id,
-                                    'info': container_info})
+        # attach container to all remaining networks
+        for net_conf in remain_net_configs:
+            self.dcli.connect_container_to_network(cont_id,
+                                                   net_id=net_conf['net_id'],
+                                                   ipv4_address=net_conf['ipv4_address'],
+                                                   ipv6_address=net_conf['ipv6_address'],
+                                                   aliases=net_conf['aliases'])
 
-            return {'status': True,
-                    'msg': "Create container {} successfully. Id: {}".format(name, container_id),
-                    'info': container_info}
-        except Exception as e:
-            raise ContainerError(e)
+        return {'container_id': cont_id,
+                'container_info': self.dcli.inspect_container(cont_id)}
 
-    @staticmethod
-    def _extract_volume_mount_name(volume_path: str):
+    # VOLUME SECTION
+    def create_volume(self, volume_config) -> {}:
+        """
+        Create a docker volume
+        :param volume_config: all information needed to create a new docker volume
+        :return: dict
+        """
+        try:
+            # skip all volumes that are already marked as "external"
+            if not 'external' in volume_config:
+                volume = self.dcli.create_volume(name=volume_config['name'],
+                                                 driver=volume_config['driver'],
+                                                 driver_opts=volume_config['driver_opts'],
+                                                 labels=volume_config['labels'])
+
+                return volume
+            return None
+        except errors.APIError as err:
+            raise VolumeError("Error creating docker volume {}".format(volume_config), err)
+
+    # NETWORK SECTION
+    def create_network(self, network_config):
+        """
+        Create a docker network
+        :param network_config: all information needed to create a new docker network
+        :return: dict
+        """
+        try:
+            # skip all networks that are already marked as "external"
+            if not 'external' in network_config and network_config['driver'] != "none":
+                if not network_config['ipam']:
+                    network = self.dcli.create_network(name=network_config['name'],
+                                                       driver=network_config['driver'],
+                                                       options=network_config['options'],
+                                                       ipam=network_config['ipam'],
+                                                       check_duplicate=network_config['check_duplicate'],
+                                                       internal=network_config['internal'],
+                                                       labels=network_config['labels'],
+                                                       enable_ipv6=network_config['enable_ipv6'],
+                                                       attachable=network_config['attachable'],
+                                                       scope=network_config['scope'],
+                                                       ingress=network_config['ingress'])
+
+                    return network
+                else:
+                    pool_configs = []
+                    for pcf in network_config['ipam']['pool_configs']:
+                        ipam_pool = types.IPAMPool(
+                            subnet=None if not pcf['subnet'] else pcf['subnet'],
+                            iprange=None if not pcf['iprange'] else pcf['iprange'],
+                            gateway=None if not pcf['gateway'] else pcf['gateway'],
+                            aux_addresses=None if not pcf['aux_addresses'] else pcf['aux_addresses']
+                        )
+                        pool_configs.append(ipam_pool)
+
+                    ipam_conf = docker.types.IPAMConfig(
+                        driver=network_config['ipam']['driver'],
+                        pool_configs=pool_configs,
+                        options=network_config['ipam']['options']
+                    )
+
+                    network = self.dcli.create_network(name=network_config['name'],
+                                                       driver=network_config['driver'],
+                                                       options=network_config['options'],
+                                                       ipam=ipam_conf,
+                                                       check_duplicate=network_config['check_duplicate'],
+                                                       internal=network_config['internal'],
+                                                       labels=network_config['labels'],
+                                                       enable_ipv6=network_config['enable_ipv6'],
+                                                       attachable=network_config['attachable'],
+                                                       scope=network_config['scope'],
+                                                       ingress=network_config['ingress'])
+
+                    return network
+
+            return None
+        except errors.APIError as err:
+            raise NetworkError("Error creating docker network {}".format(network_config), err)
+
+    def _get_network_by_name(self, network_name: str) -> {}:
+        """
+        Get network id of a given name
+        :param network_name:
+        :return: id if network is existed, None otherwise
+        """
+        networks = self.dcli.networks(names=[network_name])
+        if len(networks) > 0:
+            for network in networks:
+                if network_name == network['Name']:
+                    return network
+        return None
+
+    # IMAGE SECTION
+    def _image_pulled(self, repo: str, tag: str) -> bool:
+        """
+        Check if image with repo:tag already pulled
+        :param repo: repo of image
+        :param tag: tag of image
+        :return: True if image has already downloaded, False otherwise.
+        """
+        local_images = self.dcli.images()
+        image = "{}:{}".format(repo, tag)
+        for img in local_images:
+            if img.get("RepoTags", None):
+                if image in img.get("RepoTags", []):
+                    return True
+
+        return False
+
+    def pull_image(self, repo: str, tag: str):
+        """
+        Try to download image from docker hub/custom repo
+        :param repo: repo of image
+        :param tag: tag of image
+        """
+        try:
+            message = ""
+            for line in self.dcli.pull(repo, tag, stream=True):
+                message = message + json.dumps(json.loads(line), indent=4)
+            print("Image {}:{} pulled".format(repo, tag))
+        except errors.APIError as err:
+            raise ImageError("Cannot pull image {}:{}".format(repo, tag), err)
+
+    # UTILITY SECTION
+    def get_image_repo_tag(self, image: str) -> RepoTag:
+        # construct repo & tag attribute of an image
+        repo = None
+        tag = None
+        if image:
+            # e.g., redis or tutum/influxdb
+            if ':' not in image:
+                repo = image
+                tag = "latest"
+            else:
+                # custom repository with ip:port combination
+                # e.g., example-registry.com:4000/postgresql:1.0.0
+                if image.count(':') == 2:
+                    # split image based on '/'
+                    image_tup = tuple(part for part in image.split('/') if part)
+                    repo = image_tup[0] + tuple(part for part in image_tup[1].split(':') if part)[0]
+                    tag = tuple(part for part in image_tup[1].split(':') if part)[1]
+                # default docker hub or custom repository with ip:port combination without image tag
+                # e.g., tutum/influxdb:1.0.0 -> case #1
+                # or 159.100.243.157:5000/hello-world -> case #2
+                else:
+                    if image.index(':') > image.index('/'):
+                        repo, tag = tuple(part for part in image.split(':') if part)
+                    else:
+                        repo = image
+                        tag = "latest"
+
+        return RepoTag(repo=repo, tag=tag)
+
+    def _get_ports(self, container_port_conf: []) -> []:
+        """
+        Get ports used in docker.client.create_container(...)
+        :param container_port_conf: container original port config
+        :return: list
+        """
+        ports = []
+        for port_conf in container_port_conf:
+            if 'proto' in port_conf:
+                ports.append((port_conf['cont_port'], port_conf['proto']))
+            else:
+                ports.append(port_conf['cont_port'])
+        return ports
+
+    def _get_port_bindings(self, container_port_conf) -> {}:
+        """
+        Get port_bindings used in docker.client.create_host_config(...)
+        :param container_port_conf: container original port config
+        :return: dict
+        """
+        port_bindings = {}
+        for port_conf in container_port_conf:
+            k, v = None, None
+            if 'proto' in port_conf:
+                k = "{}.{}".format(port_conf['cont_port'], port_conf['proto'])
+            else:
+                k = port_conf['cont_port']
+            if 'host_ip' in port_conf:
+                v = (port_conf['host_ip'], port_conf['host_port'])
+            else:
+                v = port_conf['host_port']
+
+            port_bindings[k] = v
+
+        return port_bindings
+
+    def _extract_volume_mount_name(self, volume_path: str):
         """ Helper to extract mount names from volume specification paths"""
         parts = volume_path.split(":")
         if len(parts) < 3:
             return None
         return parts[1]
+
+    def _get_restart_policy(self, container_restart_conf) -> {}:
+        """
+        Get restart policy used in docker.create_host_config(...)
+        :param container_restart_conf: container original restart config
+        :return: dict
+        """
+        default_max_retries = 10
+        if container_restart_conf != 'no':
+            if 'on-failure' in container_restart_conf:
+                if ':' in container_restart_conf:
+                    retry_count = tuple(container_restart_conf.split(':'))[1]
+                    return {
+                        'Name': 'on-failure',
+                        'MaximumRetryCount': retry_count
+                    }
+                else:
+                    return {
+                        'Name': 'on-failure',
+                        'MaximumRetryCount': default_max_retries
+                    }
+            else:
+                return {
+                    'Name': 'always'
+                }
+        else:
+            return {}
+
+    def _get_extra_hosts(self, container_extra_conf) -> {}:
+        """
+        Get extra host used in docker.client.create_host_config(...)
+        :param container_extra_conf: container original extra config
+        :return: dict
+        """
+        extra_hosts = {}
+        for host in container_extra_conf:
+            hostname, ip = tuple(part for part in host.split(':') if part)
+            extra_hosts[hostname] = ip
+
+        return extra_hosts

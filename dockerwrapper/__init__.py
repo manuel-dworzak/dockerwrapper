@@ -1,2 +1,2 @@
-from .core import DockerWrapper
+from .core import DockerWrapper, RepoTag
 from .exceptions import *
