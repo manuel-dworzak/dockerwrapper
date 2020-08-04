@@ -5,10 +5,12 @@ from utilities import SingletonMeta
 
 RepoTag = collections.namedtuple("RepoTag", 'repo tag')
 
+
 class DockerWrapper(metaclass=SingletonMeta):
     """
     Wrapper class for Docker SDKs
     """
+
     def __init__(self) -> None:
         self.docker_client = None
         self.dcli = None
@@ -19,14 +21,13 @@ class DockerWrapper(metaclass=SingletonMeta):
         except Exception as e:
             raise ConfigError("Unable to initialize docker_client", e)
 
-
     def create_container(self, container_config) -> {}:
         """
         Create a Docker container based on input parameters
         :param container_config: all information needed to create a new docker container
         :return: dict
         """
-        cont_id = None # Id of new created container
+        cont_id = None  # Id of new created container
 
         # default container resource limits & other configuration
         defaults = {
@@ -45,7 +46,7 @@ class DockerWrapper(metaclass=SingletonMeta):
             raise ContainerError("Cannot create container {}. Image {} not found".format(
                 container_config['container'], container_config['image']), None)
 
-        # get entrypoint if possible
+        # get entrypoint from image if not provided in config
         if not container_config['entrypoint']:
             try:
                 image_info = self.dcli.inspect_image("{}:{}".format(*cont_image))
@@ -58,6 +59,16 @@ class DockerWrapper(metaclass=SingletonMeta):
                 raise ContainerError("Cannot create container {} using image {}. Entrypoint not found.".format(
                     container_config['container'], container_config['image']), err)
 
+        # get command from image if not provided in config
+        if not container_config['command']:
+            try:
+                image_info = self.dcli.inspect_image("{}:{}".format(*cont_image))
+
+                if image_info['Config']:
+                    container_config['command'] = image_info['Config']['Cmd']
+            except errors.APIError as err:
+                raise ContainerError("Cannot create container {} using image {}. Cmd not found.".format(
+                    container_config['container'], container_config['image']), err)
 
         # create container's host_config
         host_config = self.dcli.create_host_config(
@@ -73,17 +84,19 @@ class DockerWrapper(metaclass=SingletonMeta):
             cap_add=defaults['cap_add'],
             sysctls=container_config['sysctls'],
             port_bindings=self._get_port_bindings(container_config['ports']) if container_config['ports'] else {},
-            restart_policy=self._get_restart_policy(container_config['restart']) if container_config['restart'] else None,
-            extra_hosts=self._get_extra_hosts(container_config['extra_hosts']) if container_config['extra_hosts'] else None,
+            restart_policy=self._get_restart_policy(container_config['restart']) if container_config[
+                'restart'] else None,
+            extra_hosts=self._get_extra_hosts(container_config['extra_hosts']) if container_config[
+                'extra_hosts'] else None,
         )
 
         main_net_config = {}
         remain_net_configs = []
-        net_count = 0
-        # get first network as main config, other networks will be connected later
-        if container_config['networks']:
+        net_count = 1
+        # check and get first network as main config, other networks will be connected later
+        if 'networks' in container_config:
             for network in container_config['networks']:
-                if net_count == 0:
+                if net_count == 1:
                     print("Create main_net_config")
                     # create endpoint_config
                     endpoint_config = self.dcli.create_endpoint_config(
@@ -96,7 +109,7 @@ class DockerWrapper(metaclass=SingletonMeta):
                     })
                 else:
                     print("Create other_net_config")
-                    created_net = self._get_network_by_name(network['name'])
+                    created_net = self.get_network_by_name(network['name'])
                     if created_net:
                         remain_net_configs.append({
                             'net_id': created_net['Id'],
@@ -146,6 +159,88 @@ class DockerWrapper(metaclass=SingletonMeta):
         return {'container_id': cont_id,
                 'container_info': self.dcli.inspect_container(cont_id)}
 
+    def get_container_by_name(self, container_name: str) -> {}:
+        """
+        Get a container by name
+        :param container_name: Name of the container
+        :return: dict
+        """
+        try:
+            return self.dcli.containers(all=True, filters={
+                'name': container_name
+            })
+        except errors.APIError as err:
+            raise ContainerError("Cannot get container: name={}.".format(container_name), err)
+
+    def get_container_by_id(self, container_id: str) -> {}:
+        """
+        Get a container by name
+        :param container_id: Id of the container
+        :return: dict
+        """
+        try:
+            return self.dcli.containers(all=True, filters={
+                'id': container_id
+            })
+        except errors.APIError as err:
+            raise ContainerError("Cannot get container: id={}.".format(container_id), err)
+
+    def get_containers(self, show_all: bool = True, trunc: bool = False, filters=None):
+        """
+        List containers. Similar to the docker ps command.
+        :param show_all: Show all containers. Only running containers are shown by default (=True)
+        :param trunc: Truncate output (default=False)
+        :param filters: Filters to be processed on the image list. See more:
+        https://docker-py.readthedocs.io/en/stable/api.html#docker.api.container.ContainerApiMixin.containers
+        :return: List of dicts, one per container
+        """
+        try:
+            return self.dcli.containers(all=show_all, trunc=trunc, filters=filters)
+        except errors.APIError as err:
+            raise ContainerError("Cannot get running containers using filters=[all={},trunc={},filters={}]"
+                                 .format(show_all, trunc, filters), err)
+
+    def stop_container(self, container_id: str, timeout: int = None):
+        """
+        Stops a container. Similar to the docker stop command.
+        :param container_id: Id of the container we want to stop
+        :param timeout:  Timeout in seconds to wait for the container to stop before sending a SIGKILL.
+        :return: True if done, ContainerError otherwise
+        """
+        try:
+            self.dcli.stop(container_id, timeout=timeout)
+            return True
+        except errors.APIError as err:
+            raise ContainerError("Cannot stop container with id={}".format(container_id), err)
+
+    def remove_container(self, container_id: str, remove_volume: bool = False, remove_link: bool = False,
+                         force: bool = False):
+        """
+        Remove a container.
+        :param container_id: Id of the container we want to remove
+        :param remove_volume: Remove the volumes associated with the container
+        :param remove_link: Remove the specified link and not the underlying container
+        :param force: Force the removal of a running container (uses SIGKILL)
+        :return: True if done, ContainerError otherwise
+        """
+        try:
+            self.dcli.remove_container(container_id, v=remove_volume, link=remove_link, force=force)
+            return True
+        except errors.APIError as err:
+            raise ContainerError("Cannot remove container with id={}".format(container_id), err)
+
+    def remove_unused_containers(self, filters=None) -> {}:
+        """
+        Delete all stopped containers
+        :param filters:  Filters to process on the prune list.
+        :return: A dict containing a list of deleted container IDs and
+                the amount of disk space reclaimed in bytes.
+        """
+        try:
+            return self.dcli.prune_containers(filters=filters)
+        except errors.APIError as err:
+            raise ContainerError("Cannot prune containers with filters={}".format(filters), err)
+
     # VOLUME SECTION
     def create_volume(self, volume_config) -> {}:
         """
@@ -155,16 +250,65 @@ class DockerWrapper(metaclass=SingletonMeta):
         """
         try:
             # skip all volumes that are already marked as "external"
-            if not 'external' in volume_config:
+            if 'external' not in volume_config:
                 volume = self.dcli.create_volume(name=volume_config['name'],
                                                  driver=volume_config['driver'],
                                                  driver_opts=volume_config['driver_opts'],
                                                  labels=volume_config['labels'])
-
                 return volume
             return None
         except errors.APIError as err:
             raise VolumeError("Error creating docker volume {}".format(volume_config), err)
+
+    def get_volume_by_name(self, volume_name: str) -> {}:
+        """
+        Get volume by a given name
+        :param volume_name: name of volume we want to search for
+        :return: Network object if network is existed, None otherwise
+        """
+        volumes = self.dcli.volumes()
+        if len(volumes['Volumes']) > 0:
+            for volume in volumes['Volumes']:
+                if volume_name == volume['Name']:
+                    return volume
+        return None
+
+    def get_volumes(self, filters=None):
+        """
+        List all volumes, can be filtered by names and/or additional information
+        :param filters:
+        :return:
+        """
+        try:
+            return self.dcli.volumes(filters=filters)
+        except errors.APIError as err:
+            raise VolumeError('Cannot show all volumes using filter={}'.format(filters), err)
+
+    def remove_volume_by_name(self, volume_name: str):
+        """
+        Try to remove volume using its name
+        :param volume_name: The volume’s name will be removed
+        """
+        try:
+            removed_volume = self.get_volume_by_name(volume_name)
+
+            if removed_volume:
+                self.dcli.remove_volume(removed_volume['Name'], force=True)
+            else:
+                raise VolumeError('Cannot find volume name={} to remove'.format(volume_name), None)
+        except VolumeError as err:
+            raise err
+
+    def remove_unused_volumes(self, filters=None) -> {}:
+        """
+        Remove all unused volumes
+        :param filters: Filters to process on the prune list.
+        :return: dict
+        """
+        try:
+            return self.dcli.prune_volumes(filters=filters)
+        except errors.APIError as err:
+            raise VolumeError('Cannot prune volumes.', err)
 
     # NETWORK SECTION
     def create_network(self, network_config):
@@ -175,8 +319,8 @@ class DockerWrapper(metaclass=SingletonMeta):
         """
         try:
             # skip all networks that are already marked as "external"
-            if not 'external' in network_config and network_config['driver'] != "none":
-                if not network_config['ipam']:
+            if 'external' not in network_config and network_config['driver'] != "none":
+                if 'ipam' not in network_config:
                     network = self.dcli.create_network(name=network_config['name'],
                                                        driver=network_config['driver'],
                                                        options=network_config['options'],
@@ -225,11 +369,11 @@ class DockerWrapper(metaclass=SingletonMeta):
         except errors.APIError as err:
             raise NetworkError("Error creating docker network {}".format(network_config), err)
 
-    def _get_network_by_name(self, network_name: str) -> {}:
+    def get_network_by_name(self, network_name: str) -> {}:
         """
-        Get network id of a given name
-        :param network_name:
-        :return: id if network is existed, None otherwise
+        Get network by a given name
+        :param network_name: name of network we want to search for
+        :return: Network object if network is existed, None otherwise
         """
         networks = self.dcli.networks(names=[network_name])
         if len(networks) > 0:
@@ -237,6 +381,55 @@ class DockerWrapper(metaclass=SingletonMeta):
                 if network_name == network['Name']:
                     return network
         return None
+
+    def disconnect_container_network(self, container_id: str, net_id: str, force: bool = True):
+        """
+        Remove connect between container and one of its attached networks
+        :param container_id: container ID to be disconnected from the network
+        :param net_id: network ID to be disconnected to container
+        :param force: Force disconnection
+        """
+        self.dcli.disconnect_container_from_network(container_id, net_id, force)
+
+    def get_networks(self, names=None, filters=None) -> []:
+        """
+        List all docker networks, can be filtered by names and/or additional information
+        :param names: List of names to filter by
+        :param filters: Filters to be processed on the network list
+        :return: List of networks objects
+        """
+        try:
+            return self.dcli.networks(names=names, filters=filters)
+        except errors.APIError as err:
+            raise NetworkError('Cannot show all networks using filter names={};filters={}'.format(names, filters),
+                               err)
+
+    def remove_network_by_name(self, network_name: str):
+        """
+        Try to remove network using its name
+        :param network_name: The network’s name will be removed
+        """
+        try:
+            removed_network = self.get_network_by_name(network_name)
+
+            if removed_network:
+                self.dcli.remove_network(removed_network['Id'])
+            else:
+                raise NetworkError('Cannot find network name={} to remove'.format(network_name),
+                                   None)
+        except NetworkError as err:
+            raise err
+
+    def remove_unused_networks(self, filters=None):
+        """
+        Remove all unused networks
+        :param filters: Filters to process on the prune list.
+        :return: dict
+        """
+        try:
+            self.dcli.prune_networks(filters=filters)
+        except errors.APIError as err:
+            raise NetworkError('Cannot prune networks.', err)
 
     # IMAGE SECTION
     def _image_pulled(self, repo: str, tag: str) -> bool:
