@@ -320,7 +320,7 @@ class DockerWrapper(metaclass=SingletonMeta):
         try:
             # skip all networks that are already marked as "external"
             if 'external' not in network_config and network_config['driver'] != "none":
-                if 'ipam' not in network_config:
+                if not network_config['ipam']:
                     network = self.dcli.create_network(name=network_config['name'],
                                                        driver=network_config['driver'],
                                                        options=network_config['options'],
