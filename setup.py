@@ -14,7 +14,7 @@ URL = 'https://github.com/thanhledev/dockerwrapper'
 EMAIL = 'thanhledev@gmail.com'
 AUTHOR = 'Thanh Le'
 REQUIRES_PYTHON = '>=3.6.0'
-VERSION = '1.3.1'
+VERSION = '1.3.3'
 
 # What packages are required for this module to be executed?
 REQUIRED = [

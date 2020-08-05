@@ -10,5 +10,5 @@
 #                                                                                            | $$      | $$
 #                                                                                            |__/      |__/
 
-VERSION = (1, 3, 1)
+VERSION = (1, 3, 3)
 __version__ = '.'.join(map(str, VERSION))

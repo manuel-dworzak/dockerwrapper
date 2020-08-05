@@ -43,7 +43,7 @@ class DockerWrapper(metaclass=SingletonMeta):
         cont_image = self.get_image_repo_tag(container_config['image'])
 
         if not self._image_pulled(cont_image.repo, cont_image.tag):
-            raise ContainerError("Cannot create container {}. Image {} not found".format(
+            raise ContainerError("Cannot create container {}. Image {} not found.".format(
                 container_config['container'], container_config['image']), None)
 
         # get entrypoint from image if not provided in config
@@ -55,19 +55,13 @@ class DockerWrapper(metaclass=SingletonMeta):
                     container_config['entrypoint'] = image_info['ContainerConfig']['Entrypoint']
                 elif image_info['Config']:
                     container_config['entrypoint'] = image_info['Config']['Entrypoint']
+
+                # check if command is also not provided in the configuration
+                if not container_config['command']:
+                    if image_info['Config']:
+                        container_config['command'] = image_info['Config']['Cmd']
             except errors.APIError as err:
                 raise ContainerError("Cannot create container {} using image {}. Entrypoint not found.".format(
-                    container_config['container'], container_config['image']), err)
-
-        # get command from image if not provided in config
-        if not container_config['command']:
-            try:
-                image_info = self.dcli.inspect_image("{}:{}".format(*cont_image))
-
-                if image_info['Config']:
-                    container_config['command'] = image_info['Config']['Cmd']
-            except errors.APIError as err:
-                raise ContainerError("Cannot create container {} using image {}. Cmd not found.".format(
                     container_config['container'], container_config['image']), err)
 
         # create container's host_config
@@ -97,7 +91,7 @@ class DockerWrapper(metaclass=SingletonMeta):
         if 'networks' in container_config:
             for network in container_config['networks']:
                 if net_count == 1:
-                    print("Create main_net_config")
+                    # print("Create main_net_config")
                     # create endpoint_config
                     endpoint_config = self.dcli.create_endpoint_config(
                         aliases=network['config']['aliases'],
@@ -108,7 +102,7 @@ class DockerWrapper(metaclass=SingletonMeta):
                         network['name']: endpoint_config,
                     })
                 else:
-                    print("Create other_net_config")
+                    # print("Create other_net_config")
                     created_net = self.get_network_by_name(network['name'])
                     if created_net:
                         remain_net_configs.append({
@@ -415,8 +409,7 @@ class DockerWrapper(metaclass=SingletonMeta):
             if removed_network:
                 self.dcli.remove_network(removed_network['Id'])
             else:
-                raise NetworkError('Cannot find network name={} to remove'.format(network_name),
-                                   None)
+                raise NetworkError('Cannot find network name={} to remove'.format(network_name), None)
         except NetworkError as err:
             raise err
 
@@ -458,7 +451,7 @@ class DockerWrapper(metaclass=SingletonMeta):
             message = ""
             for line in self.dcli.pull(repo, tag, stream=True):
                 message = message + json.dumps(json.loads(line), indent=4)
-            print("Image {}:{} pulled".format(repo, tag))
+            # print("Image {}:{} pulled".format(repo, tag))
         except errors.APIError as err:
             raise ImageError("Cannot pull image {}:{}".format(repo, tag), err)
 
