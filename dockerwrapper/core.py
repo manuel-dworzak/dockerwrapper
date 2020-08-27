@@ -1,7 +1,10 @@
-import docker, json, collections
+import collections
+import docker
+import json
 from docker import errors, types
-from .exceptions import *
 from utilities import SingletonMeta
+
+from .exceptions import *
 
 RepoTag = collections.namedtuple("RepoTag", 'repo tag')
 
@@ -82,6 +85,7 @@ class DockerWrapper(metaclass=SingletonMeta):
                 'restart'] else None,
             extra_hosts=self._get_extra_hosts(container_config['extra_hosts']) if container_config[
                 'extra_hosts'] else None,
+            pid_mode=container_config['pid']
         )
 
         main_net_config = {}
