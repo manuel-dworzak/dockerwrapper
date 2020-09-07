@@ -70,6 +70,7 @@ class DockerWrapper(metaclass=SingletonMeta):
         # create container's host_config
         host_config = self.dcli.create_host_config(
             network_mode=container_config['network_mode'],
+            privileged=container_config['privileged'],
             binds=container_config['volumes'],
             tmpfs=container_config['tmpfs'],
             publish_all_ports=defaults['publish_all_ports'],
